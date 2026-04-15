@@ -159,7 +159,6 @@ install_bdinfo() {
         # 定义镜像列表
         local mirrors=(
             "$bdinfo_url"
-            "https://ghproxy.com/$bdinfo_url"
             "https://ghfast.top/$bdinfo_url"
         )
         
