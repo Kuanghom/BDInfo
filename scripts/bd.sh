@@ -357,27 +357,61 @@ get_duration() {
     echo "$duration"
 }
 
-# 获取字幕流索引
+# 获取字幕流序号（从0开始计数，仅字幕流）
+# 返回: <字幕序号>,<字幕类型> 或空字符串
+# 字幕类型: text(文本字幕) 或 graphic(图形字幕如PGS/VOBsub)
 get_subtitle_index() {
     local input="$1"
     local language="$2"
     log_debug "【调试】查找字幕流: $language" >&2
-    local subtitle_info=$(ffprobe -v error -select_streams s -show_entries stream=index:stream_tags=language -of csv=p=0 "$input" 2>/dev/null)
+    # 获取字幕流信息：索引、编解码、语言
+    local subtitle_info=$(ffprobe -v error -select_streams s -show_entries stream=index,codec_name:stream_tags=language -of csv=p=0 "$input" 2>/dev/null)
+    log_debug "【调试】字幕流原始信息: $subtitle_info" >&2
     if [[ -z "$subtitle_info" ]]; then
         log_debug "【调试】未找到字幕流" >&2
         echo ""
         return
     fi
+    # 语言映射表（常见语言代码）
+    declare -A lang_map=(
+        ["chi"]="chinese"
+        ["zho"]="chinese"
+        ["zh"]="chinese"
+        ["cht"]="chinese"
+        ["chs"]="chinese"
+        ["eng"]="english"
+        ["en"]="english"
+        ["jpn"]="japanese"
+        ["ja"]="japanese"
+        ["kor"]="korean"
+        ["ko"]="korean"
+    )
+    # 文本字幕编解码列表（FFmpeg subtitles滤镜支持的格式）
+    local text_codecs="srt ass ssa subrip webvtt mov_text"
+    local sub_idx=0
     while IFS= read -r line; do
         local index=$(echo "$line" | cut -d',' -f1)
-        local lang=$(echo "$line" | cut -d',' -f2 | tr '[:upper:]' '[:lower:]')
-        if [[ "$lang" == *"${language,,}"* ]]; then
-            log_debug "【调试】找到字幕流: 索引 $index (语言: $lang)" >&2
-            echo "$index"
+        local codec=$(echo "$line" | cut -d',' -f2 | tr '[:upper:]' '[:lower:]')
+        local lang=$(echo "$line" | cut -d',' -f3 | tr '[:upper:]' '[:lower:]')
+        log_debug "【调试】检查字幕流: 流索引=$index, 编解码=$codec, 字幕序号=$sub_idx, 语言代码=$lang" >&2
+        # 判断字幕类型
+        local sub_type="graphic"
+        if [[ " $text_codecs " == *" $codec "* ]]; then
+            sub_type="text"
+        fi
+        log_debug "【调试】字幕类型: $sub_type (编解码: $codec)" >&2
+        # 转换为标准语言名称
+        local normalized_lang="${lang_map[$lang]:-$lang}"
+        local normalized_query="${lang_map[${language,,}]:-${language,,}}"
+        log_debug "【调试】标准化后: 流语言=$normalized_lang, 查询语言=$normalized_query" >&2
+        if [[ "$normalized_lang" == *"$normalized_query"* ]] || [[ "$lang" == *"${language,,}"* ]]; then
+            log_debug "【调试】找到匹配字幕流: 流索引=$index, 字幕序号=$sub_idx, 类型=$sub_type (语言: $lang -> $normalized_lang)" >&2
+            echo "$sub_idx,$sub_type"
             return
         fi
+        ((sub_idx++))
     done <<< "$subtitle_info"
-    log_error "【调试】未找到指定语言字幕流" >&2
+    log_error "【调试】未找到指定语言字幕流 (查找: $language)" >&2
     echo ""
 }
 
@@ -510,7 +544,14 @@ process_video_file() {
         echo "错误: 时长无效 - '$duration'" >&2
         return 1
     fi
-    local subtitle_index=$(get_subtitle_index "$video_file" "$LANGUAGE")
+    local subtitle_info=$(get_subtitle_index "$video_file" "$LANGUAGE")
+    local subtitle_index=""
+    local subtitle_type=""
+    if [[ -n "$subtitle_info" ]]; then
+        subtitle_index=$(echo "$subtitle_info" | cut -d',' -f1)
+        subtitle_type=$(echo "$subtitle_info" | cut -d',' -f2)
+        log_debug "【调试】字幕信息: 序号=$subtitle_index, 类型=$subtitle_type" >&2
+    fi
     local margin=120
     local available_duration=$((duration - 2 * margin))
     if ((duration == 0 || available_duration <= 0)); then
@@ -534,7 +575,18 @@ process_video_file() {
     done
 
     echo "↓#↓#↓#↓#↓#↓#↓#↓#↓#↓#↓ 截图 ↓#↓#↓#↓#↓#↓#↓#↓#↓#↓#↓"
-    echo "视频时长: $duration 秒, 字幕流: ${subtitle_index:-无}, 截图数量: $total_frames"
+    local subtitle_display="无"
+    local use_subtitle=false
+    if [[ -n "$subtitle_index" ]]; then
+        if [[ "$subtitle_type" == "text" ]]; then
+            subtitle_display="序号$subtitle_index (文本字幕)"
+            use_subtitle=true
+        else
+            subtitle_display="序号$subtitle_index (图形字幕,不支持烧录)"
+            log_debug "【调试】图形字幕不支持FFmpeg烧录，将跳过字幕" >&2
+        fi
+    fi
+    echo "视频时长: $duration 秒, 字幕流: $subtitle_display, 截图数量: $total_frames"
 
     # ========== 核心无花屏修复：混合Seek截图 ==========
     for ((i=0; i<total_frames; i++)); do
@@ -557,12 +609,16 @@ process_video_file() {
             -y                       # 覆盖输出
         )
 
-        # 字幕/缩放逻辑（不变）
-        if [[ -n "$subtitle_index" ]]; then
+        # 字幕/缩放逻辑
+        if [[ "$use_subtitle" == true ]]; then
+            # 转义文件路径中的特殊字符（反斜杠、冒号、单引号）
+            local escaped_file="${video_file//\\/\\\\}"
+            escaped_file="${escaped_file//:/\\:}"
+            escaped_file="${escaped_file//\'/\\\'}"
             if [[ -n "$GRID_LAYOUT" ]]; then
-                ffmpeg_cmd+=(-vf "subtitles=$video_file:si=$subtitle_index,scale=512:-1")
+                ffmpeg_cmd+=(-vf "subtitles='$escaped_file':si=$subtitle_index,scale=512:-1")
             else
-                ffmpeg_cmd+=(-vf "subtitles=$video_file:si=$subtitle_index")
+                ffmpeg_cmd+=(-vf "subtitles='$escaped_file':si=$subtitle_index")
             fi
         else
             if [[ -n "$GRID_LAYOUT" ]]; then
@@ -573,7 +629,12 @@ process_video_file() {
 
         # 执行截图并校验
         log_debug "【调试】执行截图命令: ${ffmpeg_cmd[*]}" >&2
-        "${ffmpeg_cmd[@]}" 2>/dev/null
+        local ffmpeg_output
+        ffmpeg_output=$("${ffmpeg_cmd[@]}" 2>&1)
+        local ffmpeg_exit=$?
+        if [[ -n "$ffmpeg_output" ]]; then
+            log_debug "【调试】ffmpeg 输出: $ffmpeg_output" >&2
+        fi
         if [[ -f "$outfile" && -s "$outfile" ]]; then
             local file_size=$(stat -c "%s" "$outfile" | awk '{print $1/1024 " kb"}')
             screenshot_files+=("$outfile")
