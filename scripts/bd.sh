@@ -407,23 +407,82 @@ create_grid_with_ffmpeg() {
     if [[ ${#valid_files[@]} -eq 1 ]]; then
         cp "${valid_files[0]}" "$grid_file"
     else
+        # 使用vstack+hstack组合滤镜拼接（比xstack更兼容）
         local filter_complex=""
-        for ((i=0; i<${#valid_files[@]}; i++)); do filter_complex+="[${i}:v]"; done
-        filter_complex+="tile=${cols}x${rows}:margin=5:padding=5:color=white[out]"
+        
+        # 为每个输入添加scale滤镜确保尺寸一致
+        for ((i=0; i<${#valid_files[@]}; i++)); do
+            filter_complex+="[$i:v]scale=512:288:force_original_aspect_ratio=decrease,pad=512:288:(ow-iw)/2:(oh-ih)/2:white,setsar=1[v$i];"
+        done
+        
+        # 构建网格布局：按行分组，然后垂直堆叠
+        local row_filters=""
+        for ((row=0; row<rows; row++)); do
+            local row_inputs=""
+            for ((col=0; col<cols; col++)); do
+                local idx=$((row * cols + col))
+                if [[ $idx -lt ${#valid_files[@]} ]]; then
+                    row_inputs+="[v$idx]"
+                fi
+            done
+            if [[ -n "$row_inputs" ]]; then
+                # 水平拼接每行
+                filter_complex+="${row_inputs}hstack=inputs=$(echo "$row_inputs" | grep -o '\[' | wc -l)[row$row];"
+            fi
+        done
+        
+        # 垂直拼接所有行
+        local all_rows=""
+        for ((row=0; row<rows; row++)); do
+            if [[ $((row * cols)) -lt ${#valid_files[@]} ]]; then
+                all_rows+="[row$row]"
+            fi
+        done
+        filter_complex+="${all_rows}vstack=inputs=$(echo "$all_rows" | grep -o '\[' | wc -l)[out]"
+        
         local input_args=()
         for file in "${valid_files[@]}"; do input_args+=("-i" "$file"); done
-        ffmpeg "${input_args[@]}" -filter_complex "$filter_complex" -map "[out]" -y "$grid_file" 2>/dev/null
-        if [[ $? -ne 0 ]]; then
+        
+        # 调试日志：输出完整的ffmpeg命令和参数
+        log_debug "【调试】ffmpeg拼图参数:"
+        log_debug "  - 输入文件数量: ${#valid_files[@]}"
+        log_debug "  - 输入文件列表: ${valid_files[*]}"
+        log_debug "  - 网格布局: ${cols}x${rows}"
+        log_debug "  - filter_complex: $filter_complex"
+        log_debug "  - 输出文件: $grid_file"
+        
+        # 执行ffmpeg并捕获错误输出
+        local ffmpeg_error_file="$TEMPDIR/ffmpeg_error_$$.log"
+        ffmpeg "${input_args[@]}" -filter_complex "$filter_complex" -map "[out]" -y "$grid_file" 2>"$ffmpeg_error_file"
+        local ffmpeg_exit_code=$?
+        
+        if [[ $ffmpeg_exit_code -ne 0 ]]; then
+            log_error "ffmpeg拼图失败 (退出码: $ffmpeg_exit_code)"
+            if [[ -f "$ffmpeg_error_file" && -s "$ffmpeg_error_file" ]]; then
+                log_error "ffmpeg错误输出:"
+                cat "$ffmpeg_error_file" | head -20 >> "$LOG_FILE"
+                echo "详细错误信息已记录到: $LOG_FILE" >&2
+            fi
             echo "ffmpeg拼图失败，尝试montage备用方案..." >&2
             if command -v montage &>/dev/null; then
-                montage "${valid_files[@]}" -geometry 512x -tile "${cols}x${rows}" -background white "$grid_file" 2>/dev/null
-                if [[ $? -ne 0 ]]; then
+                log_debug "【调试】尝试montage备用方案"
+                log_debug "  - montage命令: montage ${valid_files[*]} -geometry 512x -tile ${cols}x${rows} -background white $grid_file"
+                local montage_error_file="$TEMPDIR/montage_error_$$.log"
+                montage "${valid_files[@]}" -geometry 512x -tile "${cols}x${rows}" -background white "$grid_file" 2>"$montage_error_file"
+                local montage_exit_code=$?
+                if [[ $montage_exit_code -ne 0 ]]; then
+                    log_error "montage拼图失败 (退出码: $montage_exit_code)"
+                    if [[ -f "$montage_error_file" && -s "$montage_error_file" ]]; then
+                        log_error "montage错误输出:"
+                        cat "$montage_error_file" | head -20 >> "$LOG_FILE"
+                    fi
                     echo "错误: montage拼图也失败" >&2
                     return 1
                 fi
+                log_debug "【调试】montage拼图成功"
             else
                 echo "错误: montage命令不可用，无法创建拼图" >&2
-                echo "提示: 请安装ImageMagack (apt install imagemagick 或 yum install ImageMagick)" >&2
+                echo "提示: 请安装ImageMagick (apt install imagemagick 或 yum install ImageMagick)" >&2
                 return 1
             fi
         fi
