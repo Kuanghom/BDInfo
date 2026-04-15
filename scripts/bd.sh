@@ -41,6 +41,7 @@ TEMPDIR=$(mktemp -d)
 # 确保临时文件可写
 touch .image_url.txt
 chmod 666 .image_url.txt
+chmod 777 $TEMPDIR
 
 # 解析参数
 while [[ $# -gt 0 ]]; do
