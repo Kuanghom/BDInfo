@@ -70,9 +70,12 @@ Linux 系统下，使用 `chmod +x BDExtractor` 为无扩展名的 `BDExtractor`
 ### Linux
 `./BDInfoDataSubstractor bdinfo.txt bdinfo2.txt`
 
+ ---
+
 # bd.sh 脚本
 
 蓝光/普通视频截图和信息提取工具，支持自动截图、字幕渲染、拼图、图床上传等功能。
+
 
 ## 功能特性
 
@@ -82,6 +85,11 @@ Linux 系统下，使用 `chmod +x BDExtractor` 为无扩展名的 `BDExtractor`
 - 支持截图拼图功能
 - 可提取 BDInfo（蓝光）或 MediaInfo（普通视频）详细信息
 - 自动安装所需依赖和 BDInfo 工具
+- 
+## 安装方式
+```shell
+bash <(curl -fsSL https://raw.githubusercontent.com/Kuanghom/BDInfo/main/scripts/installBDTool.sh)
+```
 
 ## 命令参数
 
