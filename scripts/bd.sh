@@ -107,7 +107,7 @@ install_dependencies() {
         return 0
     fi
     local missing=()
-    for cmd in ffmpeg curl jq pngquant mediainfo; do
+    for cmd in ffmpeg curl jq pngquant mediainfo montage; do
         if ! command -v $cmd &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -125,6 +125,19 @@ install_dependencies() {
             missing+=("libicu" "libicu-devel")
             icu_missing=true
         fi
+    fi
+
+    # ImageMagick 包名映射
+    local imagemagick_pkg=""
+    if command -v apt &>/dev/null; then
+        imagemagick_pkg="imagemagick"
+    elif command -v yum &>/dev/null; then
+        imagemagick_pkg="ImageMagick"
+    fi
+
+    # 检查是否需要安装 ImageMagick
+    if ! command -v montage &>/dev/null && [ -n "$imagemagick_pkg" ]; then
+        missing+=("$imagemagick_pkg")
     fi
 
 
@@ -401,11 +414,16 @@ create_grid_with_ffmpeg() {
         for file in "${valid_files[@]}"; do input_args+=("-i" "$file"); done
         ffmpeg "${input_args[@]}" -filter_complex "$filter_complex" -map "[out]" -y "$grid_file" 2>/dev/null
         if [[ $? -ne 0 ]]; then
-            echo "拼图失败，尝试montage备用方案..." >&2
+            echo "ffmpeg拼图失败，尝试montage备用方案..." >&2
             if command -v montage &>/dev/null; then
-                montage "${valid_files[@]}" -geometry 512x -tile "${cols}x${rows}" -background white "$grid_file"
+                montage "${valid_files[@]}" -geometry 512x -tile "${cols}x${rows}" -background white "$grid_file" 2>/dev/null
+                if [[ $? -ne 0 ]]; then
+                    echo "错误: montage拼图也失败" >&2
+                    return 1
+                fi
             else
-                echo "错误: 无法创建拼图" >&2
+                echo "错误: montage命令不可用，无法创建拼图" >&2
+                echo "提示: 请安装ImageMagack (apt install imagemagick 或 yum install ImageMagick)" >&2
                 return 1
             fi
         fi
